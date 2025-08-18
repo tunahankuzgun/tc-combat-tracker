@@ -53,8 +53,10 @@ export interface Battle {
   currentTurn: number;
   currentUnitIndex: number;
 
-  gloryPool: number;
-  bloodMarkers: number;
+  gloryPool: number; // Global pool (backward compatibility)
+  factionGloryPools: Record<string, number>; // Per-faction glory pools
+  bloodMarkers: number; // Global pool (backward compatibility)
+  factionBloodMarkers: Record<string, number>; // Per-faction blood markers
 
   combatLog: LogEntry[];
   notes: string;

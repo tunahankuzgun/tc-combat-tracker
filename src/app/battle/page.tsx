@@ -24,6 +24,9 @@ import {
   healUnit,
   processEndOfTurnEffects,
   createDiceRoll,
+  calculateGloryFromDamage,
+  calculateGloryFromDefeat,
+  isUnitDefeated,
 } from "@/lib/gameUtils";
 
 export default function BattlePage() {
@@ -42,6 +45,31 @@ export default function BattlePage() {
     setBattle(currentBattle);
     setLoading(false);
   }, [router]);
+
+  // Faction blood markers ve glory pools'u initialize et
+  useEffect(() => {
+    if (battle && (!battle.factionBloodMarkers || !battle.factionGloryPools)) {
+      const factions = Array.from(
+        new Set(battle.units.map((unit) => unit.faction))
+      );
+      const updatedBattle = {
+        ...battle,
+        factionBloodMarkers:
+          battle.factionBloodMarkers ||
+          factions.reduce((acc, faction) => {
+            acc[faction] = 0;
+            return acc;
+          }, {} as Record<string, number>),
+        factionGloryPools:
+          battle.factionGloryPools ||
+          factions.reduce((acc, faction) => {
+            acc[faction] = 0;
+            return acc;
+          }, {} as Record<string, number>),
+      };
+      saveBattleState(updatedBattle);
+    }
+  }, [battle]);
 
   const saveBattleState = (updatedBattle: Battle) => {
     setBattle(updatedBattle);
@@ -107,15 +135,89 @@ export default function BattlePage() {
     saveBattleState(updatedBattle);
   };
 
-  const damageUnit = (unitId: string, damage: number) => {
+  const damageUnit = (unitId: string, damage: number, attackerId?: string) => {
     if (!battle) return;
 
     const unit = battle.units.find((u) => u.id === unitId);
     if (!unit) return;
 
+    const wasAlive = !isUnitDefeated(unit);
     const updatedUnit = applyDamage(unit, damage);
-    updateUnit(unitId, updatedUnit);
+    const isNowDefeated = isUnitDefeated(updatedUnit);
 
+    // Battle state'i güncelle
+    const updatedBattle = {
+      ...battle,
+      units: battle.units.map((u) => (u.id === unitId ? updatedUnit : u)),
+    };
+
+    // Otomatik glory hesaplama
+    if (attackerId && attackerId !== unitId) {
+      // Kendine hasar vermek glory vermez
+      const attacker = battle.units.find((u) => u.id === attackerId);
+      if (attacker) {
+        // Hasar verme glory'si
+        const damageGlory = calculateGloryFromDamage(damage);
+        if (damageGlory > 0) {
+          // Attacker'a glory ekle
+          updatedBattle.units = updatedBattle.units.map((u) =>
+            u.id === attackerId
+              ? { ...u, gloryPoints: u.gloryPoints + damageGlory }
+              : u
+          );
+          updatedBattle.gloryPool += damageGlory;
+
+          // Faction glory pool'a da ekle
+          if (updatedBattle.factionGloryPools) {
+            updatedBattle.factionGloryPools = {
+              ...updatedBattle.factionGloryPools,
+              [attacker.faction]:
+                (updatedBattle.factionGloryPools[attacker.faction] || 0) +
+                damageGlory,
+            };
+          }
+
+          logGloryEarned(
+            battle.id,
+            attackerId,
+            damageGlory,
+            `${damage} hasar verme`
+          );
+        }
+
+        // Düşmanı öldürme glory'si
+        if (wasAlive && isNowDefeated) {
+          const defeatGlory = calculateGloryFromDefeat(unit);
+
+          // Attacker'a defeat glory ekle
+          updatedBattle.units = updatedBattle.units.map((u) =>
+            u.id === attackerId
+              ? { ...u, gloryPoints: u.gloryPoints + defeatGlory }
+              : u
+          );
+          updatedBattle.gloryPool += defeatGlory;
+
+          // Faction glory pool'a da ekle
+          if (updatedBattle.factionGloryPools) {
+            updatedBattle.factionGloryPools = {
+              ...updatedBattle.factionGloryPools,
+              [attacker.faction]:
+                (updatedBattle.factionGloryPools[attacker.faction] || 0) +
+                defeatGlory,
+            };
+          }
+
+          logGloryEarned(
+            battle.id,
+            attackerId,
+            defeatGlory,
+            `${unit.name} öldürme`
+          );
+        }
+      }
+    }
+
+    saveBattleState(updatedBattle);
     logDamage(battle.id, unitId, damage);
   };
 
@@ -135,8 +237,61 @@ export default function BattlePage() {
     const unit = battle.units.find((u) => u.id === unitId);
     if (!unit) return;
 
-    updateUnit(unitId, { gloryPoints: unit.gloryPoints + amount });
+    // Battle state'i güncelle
+    const updatedBattle = {
+      ...battle,
+      gloryPool: battle.gloryPool + amount, // Backward compatibility
+      factionGloryPools: battle.factionGloryPools
+        ? {
+            ...battle.factionGloryPools,
+            [unit.faction]:
+              (battle.factionGloryPools[unit.faction] || 0) + amount,
+          }
+        : battle.factionGloryPools,
+      units: battle.units.map((u) =>
+        u.id === unitId ? { ...u, gloryPoints: u.gloryPoints + amount } : u
+      ),
+    };
+
+    saveBattleState(updatedBattle);
     logGloryEarned(battle.id, unitId, amount, reason);
+  };
+
+  const spendGloryPool = (amount: number, reason: string) => {
+    if (!battle || battle.gloryPool < amount) return;
+
+    const updatedBattle = {
+      ...battle,
+      gloryPool: battle.gloryPool - amount,
+    };
+    saveBattleState(updatedBattle);
+
+    // Log the spending
+    const logEntry = {
+      id: crypto.randomUUID(),
+      type: LogType.GLORY_EARNED, // Reuse this type for glory spending
+      message: `Glory Pool: ${amount} glory harcandı (${reason})`,
+      timestamp: new Date(),
+    };
+
+    updatedBattle.combatLog = [...updatedBattle.combatLog, logEntry];
+    saveBattleState(updatedBattle);
+  };
+
+  const spendBloodMarkers = (faction: string, amount: number) => {
+    if (!battle || !battle.factionBloodMarkers) return;
+
+    const updatedBattle = {
+      ...battle,
+      factionBloodMarkers: {
+        ...battle.factionBloodMarkers,
+        [faction]: Math.max(
+          0,
+          (battle.factionBloodMarkers[faction] || 0) - amount
+        ),
+      },
+    };
+    saveBattleState(updatedBattle);
   };
 
   if (loading) {
@@ -161,6 +316,11 @@ export default function BattlePage() {
   }
 
   const currentUnit = getCurrentUnit(battle);
+
+  // Battle'daki faction'ları al
+  const factions = Array.from(
+    new Set(battle.units.map((unit) => unit.faction))
+  );
 
   return (
     <div className="min-h-screen bg-slate-900 p-4">
@@ -197,15 +357,186 @@ export default function BattlePage() {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
             <div className="text-center">
               <div className="text-slate-400">Glory Pool</div>
-              <div className="text-xl font-bold text-yellow-400">
-                {battle.gloryPool}
-              </div>
+              {battle.factionGloryPools &&
+              Object.keys(battle.factionGloryPools).length > 0 ? (
+                <div className="space-y-1">
+                  {factions.map((faction) => {
+                    const factionConfig = FACTION_CONFIGS[faction];
+                    const gloryCount = battle.factionGloryPools?.[faction] || 0;
+                    return (
+                      <div key={faction} className="text-sm">
+                        <div
+                          className="text-xs"
+                          style={{ color: factionConfig.color }}
+                        >
+                          {factionConfig.name}
+                        </div>
+                        <div className="flex items-center justify-center gap-1">
+                          <span className="text-yellow-400 font-bold">
+                            {gloryCount}
+                          </span>
+                          <button
+                            onClick={() => {
+                              if (gloryCount > 0) {
+                                const updatedBattle = {
+                                  ...battle,
+                                  factionGloryPools: {
+                                    ...battle.factionGloryPools,
+                                    [faction]: gloryCount - 1,
+                                  },
+                                };
+                                saveBattleState(updatedBattle);
+                              }
+                            }}
+                            disabled={gloryCount <= 0}
+                            className="px-1 py-0.5 text-xs bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded"
+                          >
+                            -
+                          </button>
+                          <button
+                            onClick={() => {
+                              const updatedBattle = {
+                                ...battle,
+                                factionGloryPools: {
+                                  ...battle.factionGloryPools,
+                                  [faction]: gloryCount + 1,
+                                },
+                              };
+                              saveBattleState(updatedBattle);
+                            }}
+                            className="px-1 py-0.5 text-xs bg-green-600 hover:bg-green-500 rounded"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div>
+                  <div className="text-xl font-bold text-yellow-400">
+                    {battle.gloryPool}
+                  </div>
+                  <div className="flex gap-1 justify-center mt-1">
+                    <button
+                      onClick={() => spendGloryPool(1, "Glory Pool harcama")}
+                      disabled={battle.gloryPool < 1}
+                      className="px-2 py-1 text-xs bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded"
+                    >
+                      -1
+                    </button>
+                    <button
+                      onClick={() => {
+                        const updatedBattle = {
+                          ...battle,
+                          gloryPool: battle.gloryPool + 1,
+                        };
+                        saveBattleState(updatedBattle);
+                      }}
+                      className="px-2 py-1 text-xs bg-green-600 hover:bg-green-500 rounded"
+                    >
+                      +1
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="text-center">
               <div className="text-slate-400">Blood Markers</div>
-              <div className="text-xl font-bold text-red-400">
-                {battle.bloodMarkers}
-              </div>
+              {battle.factionBloodMarkers &&
+              Object.keys(battle.factionBloodMarkers).length > 0 ? (
+                <div className="space-y-1">
+                  {factions.map((faction) => {
+                    const factionConfig = FACTION_CONFIGS[faction];
+                    const bloodCount =
+                      battle.factionBloodMarkers?.[faction] || 0;
+                    return (
+                      <div key={faction} className="text-sm">
+                        <div
+                          className="text-xs"
+                          style={{ color: factionConfig.color }}
+                        >
+                          {factionConfig.name}
+                        </div>
+                        <div className="flex items-center justify-center gap-1">
+                          <span className="text-red-400 font-bold">
+                            {bloodCount}
+                          </span>
+                          <button
+                            onClick={() => {
+                              if (bloodCount > 0) {
+                                const updatedBattle = {
+                                  ...battle,
+                                  factionBloodMarkers: {
+                                    ...battle.factionBloodMarkers,
+                                    [faction]: bloodCount - 1,
+                                  },
+                                };
+                                saveBattleState(updatedBattle);
+                              }
+                            }}
+                            disabled={bloodCount <= 0}
+                            className="px-1 py-0.5 text-xs bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded"
+                          >
+                            -
+                          </button>
+                          <button
+                            onClick={() => {
+                              const updatedBattle = {
+                                ...battle,
+                                factionBloodMarkers: {
+                                  ...battle.factionBloodMarkers,
+                                  [faction]: bloodCount + 1,
+                                },
+                              };
+                              saveBattleState(updatedBattle);
+                            }}
+                            className="px-1 py-0.5 text-xs bg-green-600 hover:bg-green-500 rounded"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div>
+                  <div className="text-xl font-bold text-red-400">
+                    {battle.bloodMarkers}
+                  </div>
+                  <div className="flex gap-1 justify-center mt-1">
+                    <button
+                      onClick={() => {
+                        if (battle.bloodMarkers > 0) {
+                          const updatedBattle = {
+                            ...battle,
+                            bloodMarkers: battle.bloodMarkers - 1,
+                          };
+                          saveBattleState(updatedBattle);
+                        }
+                      }}
+                      disabled={battle.bloodMarkers <= 0}
+                      className="px-2 py-1 text-xs bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded"
+                    >
+                      -1
+                    </button>
+                    <button
+                      onClick={() => {
+                        const updatedBattle = {
+                          ...battle,
+                          bloodMarkers: battle.bloodMarkers + 1,
+                        };
+                        saveBattleState(updatedBattle);
+                      }}
+                      className="px-2 py-1 text-xs bg-green-600 hover:bg-green-500 rounded"
+                    >
+                      +1
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="text-center">
               <div className="text-slate-400">Turn</div>
@@ -273,7 +604,9 @@ export default function BattlePage() {
               key={unit.id}
               unit={unit}
               isCurrentTurn={currentUnit?.id === unit.id}
-              onDamage={(damage) => damageUnit(unit.id, damage)}
+              onDamage={(damage) =>
+                damageUnit(unit.id, damage, currentUnit?.id)
+              }
               onHeal={(healing) => healUnitAction(unit.id, healing)}
               onAddGlory={(amount, reason) => addGlory(unit.id, amount, reason)}
             />
@@ -285,12 +618,24 @@ export default function BattlePage() {
       {showDiceRoller && (
         <DiceRollerModal
           battle={battle}
+          currentUnit={currentUnit}
           onClose={() => setShowDiceRoller(false)}
+          onBloodMarkerSpent={spendBloodMarkers}
           onRoll={(roll) => {
             // Handle dice roll results
             const updatedBattle = { ...battle };
             if (roll.results.some((r: DiceResult) => r.roll === 1)) {
-              updatedBattle.bloodMarkers += 1;
+              // Current unit'in faction'ına blood marker ekle
+              if (currentUnit && battle.factionBloodMarkers) {
+                updatedBattle.factionBloodMarkers = {
+                  ...battle.factionBloodMarkers,
+                  [currentUnit.faction]:
+                    (battle.factionBloodMarkers[currentUnit.faction] || 0) + 1,
+                };
+              } else {
+                // Fallback: global blood markers
+                updatedBattle.bloodMarkers += 1;
+              }
             }
             saveBattleState(updatedBattle);
           }}
@@ -443,18 +788,37 @@ function UnitCard({
 
 interface DiceRollerModalProps {
   battle: Battle;
+  currentUnit: Unit | null;
   onClose: () => void;
   onRoll: (roll: DiceRoll) => void;
+  onBloodMarkerSpent: (faction: string, amount: number) => void;
 }
 
-function DiceRollerModal({ battle, onClose, onRoll }: DiceRollerModalProps) {
+function DiceRollerModal({
+  battle,
+  currentUnit,
+  onClose,
+  onRoll,
+  onBloodMarkerSpent,
+}: DiceRollerModalProps) {
   const [diceCount, setDiceCount] = useState(1);
   const [target, setTarget] = useState(6);
   const [description, setDescription] = useState("");
   const [bloodMarkersUsed, setBloodMarkersUsed] = useState(0);
   const [lastRoll, setLastRoll] = useState<DiceRoll | null>(null);
 
+  // Current unit'in faction'ından kullanılabilir blood marker sayısı
+  const availableBloodMarkers =
+    currentUnit && battle.factionBloodMarkers
+      ? battle.factionBloodMarkers[currentUnit.faction] || 0
+      : battle.bloodMarkers;
+
   const rollDice = () => {
+    // Blood marker harcama
+    if (bloodMarkersUsed > 0 && currentUnit) {
+      onBloodMarkerSpent(currentUnit.faction, bloodMarkersUsed);
+    }
+
     const roll = createDiceRoll(
       description || "Dice roll",
       undefined,
@@ -524,12 +888,17 @@ function DiceRollerModal({ battle, onClose, onRoll }: DiceRollerModalProps) {
 
           <div>
             <label className="block text-sm font-medium mb-1 text-slate-300">
-              Blood Markers Used (max {battle.bloodMarkers})
+              Blood Markers Used (max {availableBloodMarkers})
+              {currentUnit && battle.factionBloodMarkers && (
+                <span className="text-xs text-slate-400 ml-2">
+                  ({FACTION_CONFIGS[currentUnit.faction].name})
+                </span>
+              )}
             </label>
             <input
               type="number"
               min="0"
-              max={battle.bloodMarkers}
+              max={availableBloodMarkers}
               value={bloodMarkersUsed}
               onChange={(e) => {
                 const value = parseInt(e.target.value);

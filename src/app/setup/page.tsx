@@ -28,7 +28,9 @@ export default function BattleSetup() {
       currentTurn: 1,
       currentUnitIndex: 0,
       gloryPool: 0,
+      factionGloryPools: {},
       bloodMarkers: 0,
+      factionBloodMarkers: {},
       combatLog: [],
       notes: "",
     };
