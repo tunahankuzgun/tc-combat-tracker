@@ -1,10 +1,17 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
-
 export const metadata: Metadata = {
- title: "Trench Crusade Combat Tracker",
+  title: "Trench Crusade Combat Tracker",
   description: "Mobile-friendly combat tracker for Trench Crusade tabletop battles",
+  manifest: "/manifest.json",
+  themeColor: "#dc2626",
+  viewport: "width=device-width, initial-scale=1",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "TC Tracker"
+  }
 };
 
 export default function RootLayout({
